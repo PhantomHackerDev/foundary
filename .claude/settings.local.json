@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(forge:*)"
+      "Bash(forge:*)",
+      "Bash(git clone:*)",
+      "Bash(where forge)",
+      "Bash(cast abi-encode:*)"
     ],
     "deny": [],
     "ask": []
