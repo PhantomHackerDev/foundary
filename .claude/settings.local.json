@@ -4,7 +4,11 @@
       "Bash(forge:*)",
       "Bash(git clone:*)",
       "Bash(where forge)",
-      "Bash(cast abi-encode:*)"
+      "Bash(cast abi-encode:*)",
+      "Bash(cat:*)",
+      "Bash(cast call:*)",
+      "Bash(cast interface:*)",
+      "Bash(cast send:*)"
     ],
     "deny": [],
     "ask": []
