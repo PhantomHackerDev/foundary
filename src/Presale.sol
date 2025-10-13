@@ -42,35 +42,6 @@ contract Presale is Initializable {
     uint256 public launchDate;
     bool public tokenLaunched;
 
-    // Referral system
-    mapping(address => address) public referrer; // user => referrer address
-    mapping(address => uint256) public referralBonus; // user => bonus tokens earned from referrals
-    mapping(address => address[]) public referrals; // referrer => list of referred users
-    mapping(address => uint256) public totalReferralEarnings; // total earnings per referrer
-    uint256 public referralBonusPercent; // bonus percentage for referrer (e.g., 5 = 5%)
-
-    // Staking system
-    struct StakeInfo {
-        uint256 amount;           // Amount staked
-        uint256 stakingPeriod;    // 7, 14, or 21 days
-        uint256 stakeStartTime;   // When staking started
-        uint256 unlockTime;       // When can unstake
-        bool claimed;             // Has claimed staking rewards
-    }
-
-    mapping(address => StakeInfo) public stakes;
-    mapping(address => uint256) public stakedBalance; // Amount currently staked
-    uint256 public totalStaked; // Total tokens staked in contract
-
-    // New events
-    event ReferralRegistered(address indexed user, address indexed referrer);
-    event ReferralBonusEarned(address indexed referrer, address indexed user, uint256 bonus);
-    event TokensStaked(address indexed user, uint256 amount, uint256 period, uint256 unlockTime);
-    event TokensUnstaked(address indexed user, uint256 amount);
-    event BonusClaimed(address indexed user, uint256 amount);
-    event LaunchDateSet(uint256 launchDate);
-    event TokenLaunched(uint256 launchDate);
-
     receive() external payable {}
 
     modifier onlyDeployer() {
@@ -89,14 +60,10 @@ contract Presale is Initializable {
         totalCap = 0;
         presaleStarted = false;
         claimApproved = false;
-
-        deployer = msg.sender;
-
-        // Initialize new V2 variables
-        referralBonusPercent = 5; // 5% referral bonus by default
         tokenLaunched = false;
         launchDate = 0;
-        totalStaked = 0;
+
+        deployer = msg.sender;
     }
 
     function startPresale(uint256 _endTimeStamp) public onlyDeployer {
@@ -267,7 +234,7 @@ contract Presale is Initializable {
         return (endTimeStamp - block.timestamp);
     }
 
-    function buyTokenWithUSDT(uint256 _usdtAmount, address _referrer) public {
+    function buyTokenWithUSDT(uint256 _usdtAmount) public {
         require(!blacklisted[msg.sender], "Address is blacklisted");
         if (block.timestamp >= endTimeStamp) presaleStarted = false;
 
@@ -285,13 +252,10 @@ contract Presale is Initializable {
 
         balances[msg.sender] += tokenAmount;
 
-        // Handle referral
-        _processReferral(_referrer, tokenAmount);
-
         emit TokenBuyWithUSDT(msg.sender, _usdtAmount);
     }
 
-    function buyTokenWithUSDC(uint256 _usdcAmount, address _referrer) public {
+    function buyTokenWithUSDC(uint256 _usdcAmount) public {
         require(!blacklisted[msg.sender], "Address is blacklisted");
         if (block.timestamp >= endTimeStamp) presaleStarted = false;
 
@@ -313,13 +277,10 @@ contract Presale is Initializable {
 
         balances[msg.sender] += tokenAmount;
 
-        // Handle referral
-        _processReferral(_referrer, tokenAmount);
-
         emit TokenBuyWithUSDC(msg.sender, _usdcAmount);
     }
 
-    function buyTokenWithETH(address _referrer) public payable {
+    function buyTokenWithETH() public payable {
         require(!blacklisted[msg.sender], "Address is blacklisted");
         if (block.timestamp >= endTimeStamp) presaleStarted = false;
 
@@ -342,9 +303,6 @@ contract Presale is Initializable {
         totalCap += usdAmount;
         balances[msg.sender] += tokenAmount;
 
-        // Handle referral
-        _processReferral(_referrer, tokenAmount);
-
         emit TokenBuyWithETH(msg.sender, usdAmount);
     }
 
@@ -357,8 +315,7 @@ contract Presale is Initializable {
         require(tokenLaunched == true, "Token not launched yet!");
         require(_amount > 0, "Invalid claim amount");
 
-        // Calculate available balance (total - amount)
-        require(balances[msg.sender] >= _amount , "Invalid claim amount or tokens are staked");
+        require(balances[msg.sender] >= _amount , "Invalid claim amount");
 
         require(pshiba.balanceOf(address(this)) >= _amount, "Insufficient amount of pshiba in contract");
         balances[msg.sender] -= _amount;
@@ -376,13 +333,10 @@ contract Presale is Initializable {
         emit TokenClaimed(_to, _amount);
     }
 
-    // ============ NEW FUNCTIONS (V2) ============
-
     // Launch management
     function setLaunchDate(uint256 _launchDate) external onlyDeployer {
         require(_launchDate > block.timestamp, "Launch date must be in future");
         launchDate = _launchDate;
-        emit LaunchDateSet(_launchDate);
     }
 
     function launchToken() external onlyDeployer {
@@ -391,155 +345,5 @@ contract Presale is Initializable {
         if (launchDate == 0) {
             launchDate = block.timestamp;
         }
-        emit TokenLaunched(launchDate);
-    }
-
-    // Referral system
-    function _processReferral(address _referrer, uint256 _tokenAmount) internal {
-        // Only set referrer on first purchase and if valid
-        if (referrer[msg.sender] == address(0) && _referrer != address(0) && _referrer != msg.sender) {
-            referrer[msg.sender] = _referrer;
-            referrals[_referrer].push(msg.sender);
-            emit ReferralRegistered(msg.sender, _referrer);
-        }
-
-        // Give bonus to referrer if they exist
-        if (referrer[msg.sender] != address(0)) {
-            address userReferrer = referrer[msg.sender];
-            uint256 bonus = (_tokenAmount * referralBonusPercent) / 100;
-            referralBonus[userReferrer] += bonus;
-            totalReferralEarnings[userReferrer] += bonus;
-            emit ReferralBonusEarned(userReferrer, msg.sender, bonus);
-        }
-    }
-
-    function setReferralBonusPercent(uint256 _percent) external onlyDeployer {
-        require(_percent <= 20, "Bonus too high"); // Max 20%
-        referralBonusPercent = _percent;
-    }
-
-    function claimReferralBonus() external {
-        require(!blacklisted[msg.sender], "Address is blacklisted");
-        require(tokenLaunched == true, "Token not launched yet!");
-        uint256 bonus = referralBonus[msg.sender];
-        require(bonus > 0, "No referral bonus to claim");
-
-        require(pshiba.balanceOf(address(this)) >= bonus, "Insufficient PSHIBA in contract");
-
-        referralBonus[msg.sender] = 0;
-        pshiba.transfer(msg.sender, bonus);
-
-        emit BonusClaimed(msg.sender, bonus);
-    }
-
-    // Staking system (only after token launch)
-    function stakeTokens(uint256 _amount, uint256 _period) external {
-        require(!blacklisted[msg.sender], "Address is blacklisted");
-        require(tokenLaunched == true, "Token not launched yet!");
-        require(_period == 7 || _period == 14 || _period == 21, "Invalid staking period");
-        require(_amount > 0, "Invalid stake amount");
-
-        // Check available balance (not already staked)
-        uint256 availableBalance = balances[msg.sender] - stakedBalance[msg.sender];
-        require(availableBalance >= _amount, "Insufficient available balance");
-
-        // Check if user already has an active stake
-        require(stakes[msg.sender].amount == 0 || stakes[msg.sender].claimed, "Already have active stake");
-
-        uint256 unlockTime = block.timestamp + (_period * 1 days);
-
-        stakes[msg.sender] = StakeInfo({
-            amount: _amount,
-            stakingPeriod: _period,
-            stakeStartTime: block.timestamp,
-            unlockTime: unlockTime,
-            claimed: false
-        });
-
-        stakedBalance[msg.sender] += _amount;
-        totalStaked += _amount;
-
-        emit TokensStaked(msg.sender, _amount, _period, unlockTime);
-    }
-
-    function unstakeTokens() external {
-        require(!blacklisted[msg.sender], "Address is blacklisted");
-        StakeInfo storage stake = stakes[msg.sender];
-        require(stake.amount > 0, "No active stake");
-        require(!stake.claimed, "Already unstaked");
-        require(block.timestamp >= stake.unlockTime, "Staking period not completed");
-
-        uint256 amount = stake.amount;
-        stake.claimed = true;
-        stakedBalance[msg.sender] -= amount;
-        totalStaked -= amount;
-
-        // Tokens remain in balances, just no longer staked
-        emit TokensUnstaked(msg.sender, amount);
-    }
-
-    // View functions for dashboard
-    function getUserDashboard(address _user) external view returns (
-        uint256 totalBalance,        // Total PSHIBA purchased
-        uint256 availableBalance,    // Not staked, can claim
-        uint256 stakedAmount,        // Currently staked
-        uint256 referralEarnings,    // Referral bonus available
-        uint256 stakeUnlockTime,     // When can unstake
-        bool canClaim,               // Is token launched
-        bool canUnstake,             // Is stake period over
-        uint256 referredCount        // How many people referred
-    ) {
-        totalBalance = balances[_user];
-        stakedAmount = stakedBalance[_user];
-        availableBalance = totalBalance - stakedAmount;
-        referralEarnings = referralBonus[_user];
-
-        StakeInfo memory stake = stakes[_user];
-        stakeUnlockTime = stake.unlockTime;
-
-        canClaim = tokenLaunched;
-        canUnstake = stake.amount > 0 && !stake.claimed && block.timestamp >= stake.unlockTime;
-        referredCount = referrals[_user].length;
-    }
-
-    function getStakeInfo(address _user) external view returns (
-        uint256 amount,
-        uint256 stakingPeriod,
-        uint256 stakeStartTime,
-        uint256 unlockTime,
-        bool claimed,
-        uint256 remainingTime
-    ) {
-        StakeInfo memory stake = stakes[_user];
-        amount = stake.amount;
-        stakingPeriod = stake.stakingPeriod;
-        stakeStartTime = stake.stakeStartTime;
-        unlockTime = stake.unlockTime;
-        claimed = stake.claimed;
-
-        if (block.timestamp < unlockTime) {
-            remainingTime = unlockTime - block.timestamp;
-        } else {
-            remainingTime = 0;
-        }
-    }
-
-    function getReferralInfo(address _user) external view returns (
-        address userReferrer,
-        uint256 bonusEarned,
-        uint256 totalEarnings,
-        address[] memory referredUsers,
-        uint256 referredCount
-    ) {
-        userReferrer = referrer[_user];
-        bonusEarned = referralBonus[_user];
-        totalEarnings = totalReferralEarnings[_user];
-        referredUsers = referrals[_user];
-        referredCount = referrals[_user].length;
-    }
-
-    // Available balance (not staked)
-    function getAvailableBalance(address _user) external view returns (uint256) {
-        return balances[_user] - stakedBalance[_user];
     }
 }
