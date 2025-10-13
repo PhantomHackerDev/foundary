@@ -38,25 +38,35 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     // Early withdrawal penalty percentage (100 = 1%)
     uint256 public earlyWithdrawalPenalty;
 
-    // Staker information
-    struct StakerInfo {
-        uint256 stakedAmount;           // Amount of tokens staked
-        uint256 rewardPerTokenPaid;     // Reward per token paid
-        uint256 rewards;                // Pending rewards
-        uint256 lastStakedTime;         // Last time user staked
+    // Token launch status
+    bool public tokenLaunched;
+    uint256 public launchDate;
+
+    // Individual stake information
+    struct StakeInfo {
+        uint256 amount;                 // Amount of tokens staked
+        uint256 startTime;              // When this stake was created
+        uint256 rewardPerTokenPaid;     // Reward per token paid for this stake
+        uint256 rewards;                // Pending rewards for this stake
+        bool withdrawn;                 // Whether this stake has been withdrawn
     }
 
-    // Mapping from staker address to staker info
-    mapping(address => StakerInfo) public stakers;
+    // Mapping from staker address to array of stakes
+    mapping(address => StakeInfo[]) public userStakes;
+
+    // Mapping from staker address to total staked amount
+    mapping(address => uint256) public userTotalStaked;
 
     // Events
-    event Staked(address indexed user, uint256 amount);
-    event Withdrawn(address indexed user, uint256 amount, uint256 penalty);
-    event RewardClaimed(address indexed user, uint256 reward);
+    event StakeCreated(address indexed user, uint256 stakeIndex, uint256 amount);
+    event StakeWithdrawn(address indexed user, uint256 stakeIndex, uint256 amount, uint256 penalty);
+    event StakeRewardClaimed(address indexed user, uint256 stakeIndex, uint256 reward);
+    event AllRewardsClaimed(address indexed user, uint256 totalReward);
     event RewardRateUpdated(uint256 newRate);
     event MinimumStakingPeriodUpdated(uint256 newPeriod);
     event EarlyWithdrawalPenaltyUpdated(uint256 newPenalty);
-    event EmergencyWithdraw(address indexed user, uint256 amount);
+    event EmergencyWithdrawStake(address indexed user, uint256 stakeIndex, uint256 amount);
+    event TokenLaunched(uint256 launchDate);
 
     /**
      * @dev Constructor
@@ -83,19 +93,16 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
         minimumStakingPeriod = _minimumStakingPeriod;
         earlyWithdrawalPenalty = _earlyWithdrawalPenalty;
         lastUpdateTime = block.timestamp;
+        tokenLaunched = false;
+        launchDate = 0;
     }
 
     /**
-     * @dev Update reward variables
+     * @dev Update global reward variables
      */
     modifier updateReward(address account) {
         rewardPerTokenStored = rewardPerToken();
         lastUpdateTime = block.timestamp;
-
-        if (account != address(0)) {
-            stakers[account].rewards = earned(account);
-            stakers[account].rewardPerTokenPaid = rewardPerTokenStored;
-        }
         _;
     }
 
@@ -112,117 +119,6 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
             (((block.timestamp - lastUpdateTime) * rewardRate * 1e18) / totalStaked);
     }
 
-    /**
-     * @dev Calculate earned rewards for an account
-     * @param account Address to check
-     * @return Amount of rewards earned
-     */
-    function earned(address account) public view returns (uint256) {
-        StakerInfo memory staker = stakers[account];
-        return ((staker.stakedAmount *
-            (rewardPerToken() - staker.rewardPerTokenPaid)) / 1e18) + staker.rewards;
-    }
-
-    /**
-     * @dev Stake tokens
-     * @param amount Amount to stake
-     */
-    function stake(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
-        require(amount > 0, "Cannot stake 0");
-
-        StakerInfo storage staker = stakers[msg.sender];
-
-        // Update staker info
-        staker.stakedAmount += amount;
-        staker.lastStakedTime = block.timestamp;
-        totalStaked += amount;
-
-        // Transfer tokens from user to contract
-        stakingToken.safeTransferFrom(msg.sender, address(this), amount);
-
-        emit Staked(msg.sender, amount);
-    }
-
-    /**
-     * @dev Withdraw staked tokens
-     * @param amount Amount to withdraw
-     */
-    function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
-        require(amount > 0, "Cannot withdraw 0");
-
-        StakerInfo storage staker = stakers[msg.sender];
-        require(staker.stakedAmount >= amount, "Insufficient staked amount");
-
-        uint256 penalty = 0;
-
-        // Check if early withdrawal penalty applies
-        if (block.timestamp < staker.lastStakedTime + minimumStakingPeriod) {
-            penalty = (amount * earlyWithdrawalPenalty) / 10000;
-        }
-
-        // Update state
-        staker.stakedAmount -= amount;
-        totalStaked -= amount;
-
-        // Transfer tokens
-        uint256 amountToTransfer = amount - penalty;
-        stakingToken.safeTransfer(msg.sender, amountToTransfer);
-
-        // Transfer penalty to owner if applicable
-        if (penalty > 0) {
-            stakingToken.safeTransfer(owner(), penalty);
-        }
-
-        emit Withdrawn(msg.sender, amount, penalty);
-    }
-
-    /**
-     * @dev Claim rewards
-     */
-    function claimReward() public nonReentrant updateReward(msg.sender) {
-        StakerInfo storage staker = stakers[msg.sender];
-        uint256 reward = staker.rewards;
-
-        require(reward > 0, "No rewards to claim");
-
-        staker.rewards = 0;
-        rewardToken.safeTransfer(msg.sender, reward);
-
-        emit RewardClaimed(msg.sender, reward);
-    }
-
-    /**
-     * @dev Withdraw all staked tokens and claim all rewards
-     */
-    function exit() external {
-        StakerInfo memory staker = stakers[msg.sender];
-        if (staker.stakedAmount > 0) {
-            withdraw(staker.stakedAmount);
-        }
-        if (staker.rewards > 0) {
-            claimReward();
-        }
-    }
-
-    /**
-     * @dev Emergency withdraw without caring about rewards (no penalty)
-     */
-    function emergencyWithdraw() external nonReentrant {
-        StakerInfo storage staker = stakers[msg.sender];
-        uint256 amount = staker.stakedAmount;
-
-        require(amount > 0, "Nothing to withdraw");
-
-        // Reset staker info
-        staker.stakedAmount = 0;
-        staker.rewards = 0;
-        staker.rewardPerTokenPaid = 0;
-        totalStaked -= amount;
-
-        stakingToken.safeTransfer(msg.sender, amount);
-
-        emit EmergencyWithdraw(msg.sender, amount);
-    }
 
     // ============ Admin Functions ============
 
@@ -285,38 +181,304 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
         _unpause();
     }
 
-    // ============ View Functions ============
-
     /**
-     * @dev Get staker information
-     * @param account Address to query
-     * @return stakedAmount Amount staked
-     * @return earnedRewards Earned rewards
-     * @return lastStakedTime Last stake timestamp
+     * @dev Set launch date for token
+     * @param _launchDate Launch date timestamp
      */
-    function getStakerInfo(address account) external view returns (
-        uint256 stakedAmount,
-        uint256 earnedRewards,
-        uint256 lastStakedTime
-    ) {
-        StakerInfo memory staker = stakers[account];
-        return (
-            staker.stakedAmount,
-            earned(account),
-            staker.lastStakedTime
-        );
+    function setLaunchDate(uint256 _launchDate) external onlyOwner {
+        require(!tokenLaunched, "Token already launched");
+        require(_launchDate > block.timestamp, "Launch date must be in future");
+        launchDate = _launchDate;
     }
 
     /**
-     * @dev Calculate potential penalty for early withdrawal
+     * @dev Launch token and enable staking
+     */
+    function launchToken() external onlyOwner {
+        require(!tokenLaunched, "Token already launched");
+        tokenLaunched = true;
+        if (launchDate == 0) {
+            launchDate = block.timestamp;
+        }
+        emit TokenLaunched(launchDate);
+    }
+
+    // ============ Multiple Stakes Functions ============
+
+    /**
+     * @dev Create a new stake
+     * @param amount Amount to stake
+     */
+    function createStake(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
+        require(tokenLaunched, "Staking not available: Token not launched yet");
+        require(amount > 0, "Cannot stake 0");
+
+        // Update total staked
+        userTotalStaked[msg.sender] += amount;
+        totalStaked += amount;
+
+        // Create new stake
+        userStakes[msg.sender].push(StakeInfo({
+            amount: amount,
+            startTime: block.timestamp,
+            rewardPerTokenPaid: rewardPerTokenStored,
+            rewards: 0,
+            withdrawn: false
+        }));
+
+        uint256 stakeIndex = userStakes[msg.sender].length - 1;
+
+        // Transfer tokens from user to contract
+        stakingToken.safeTransferFrom(msg.sender, address(this), amount);
+
+        emit StakeCreated(msg.sender, stakeIndex, amount);
+    }
+
+    /**
+     * @dev Withdraw a specific stake
+     * @param stakeIndex Index of the stake to withdraw
+     */
+    function withdrawStake(uint256 stakeIndex) public nonReentrant updateReward(msg.sender) {
+        require(stakeIndex < userStakes[msg.sender].length, "Invalid stake index");
+
+        StakeInfo storage stakeInfo = userStakes[msg.sender][stakeIndex];
+        require(!stakeInfo.withdrawn, "Stake already withdrawn");
+        require(stakeInfo.amount > 0, "Nothing to withdraw");
+
+        uint256 amount = stakeInfo.amount;
+        uint256 penalty = 0;
+
+        // Check if early withdrawal penalty applies
+        if (block.timestamp < stakeInfo.startTime + minimumStakingPeriod) {
+            penalty = (amount * earlyWithdrawalPenalty) / 10000;
+        }
+
+        // Calculate and store rewards before withdrawal
+        uint256 stakeReward = calculateStakeReward(msg.sender, stakeIndex);
+        stakeInfo.rewards = stakeReward;
+
+        // Mark as withdrawn
+        stakeInfo.withdrawn = true;
+
+        // Update totals
+        userTotalStaked[msg.sender] -= amount;
+        totalStaked -= amount;
+
+        // Transfer tokens
+        uint256 amountToTransfer = amount - penalty;
+        stakingToken.safeTransfer(msg.sender, amountToTransfer);
+
+        // Transfer penalty to owner if applicable
+        if (penalty > 0) {
+            stakingToken.safeTransfer(owner(), penalty);
+        }
+
+        emit StakeWithdrawn(msg.sender, stakeIndex, amount, penalty);
+    }
+
+    /**
+     * @dev Claim rewards from a specific stake
+     * @param stakeIndex Index of the stake
+     */
+    function claimStakeReward(uint256 stakeIndex) public nonReentrant updateReward(msg.sender) {
+        require(stakeIndex < userStakes[msg.sender].length, "Invalid stake index");
+
+        StakeInfo storage stakeInfo = userStakes[msg.sender][stakeIndex];
+        require(!stakeInfo.withdrawn, "Stake already withdrawn");
+
+        uint256 reward = calculateStakeReward(msg.sender, stakeIndex);
+        require(reward > 0, "No rewards to claim");
+
+        // Update stake reward tracking
+        stakeInfo.rewardPerTokenPaid = rewardPerTokenStored;
+        stakeInfo.rewards = 0;
+
+        // Transfer reward
+        rewardToken.safeTransfer(msg.sender, reward);
+
+        emit StakeRewardClaimed(msg.sender, stakeIndex, reward);
+    }
+
+    /**
+     * @dev Claim rewards from all active stakes
+     */
+    function claimAllStakeRewards() external nonReentrant updateReward(msg.sender) {
+        uint256 totalReward = 0;
+        StakeInfo[] storage stakes = userStakes[msg.sender];
+
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (!stakes[i].withdrawn) {
+                uint256 stakeReward = calculateStakeReward(msg.sender, i);
+                stakes[i].rewardPerTokenPaid = rewardPerTokenStored;
+                stakes[i].rewards = 0;
+                totalReward += stakeReward;
+            }
+        }
+
+        require(totalReward > 0, "No rewards to claim");
+        rewardToken.safeTransfer(msg.sender, totalReward);
+
+        emit AllRewardsClaimed(msg.sender, totalReward);
+    }
+
+    /**
+     * @dev Withdraw all active stakes
+     */
+    function withdrawAllStakes() external {
+        StakeInfo[] storage stakes = userStakes[msg.sender];
+
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (!stakes[i].withdrawn && stakes[i].amount > 0) {
+                withdrawStake(i);
+            }
+        }
+    }
+
+    /**
+     * @dev Emergency withdraw a specific stake without caring about rewards (no penalty)
+     * @param stakeIndex Index of the stake to emergency withdraw
+     */
+    function emergencyWithdrawStake(uint256 stakeIndex) external nonReentrant {
+        require(stakeIndex < userStakes[msg.sender].length, "Invalid stake index");
+
+        StakeInfo storage stakeInfo = userStakes[msg.sender][stakeIndex];
+        require(!stakeInfo.withdrawn, "Stake already withdrawn");
+        require(stakeInfo.amount > 0, "Nothing to withdraw");
+
+        uint256 amount = stakeInfo.amount;
+
+        // Mark as withdrawn and reset
+        stakeInfo.withdrawn = true;
+        stakeInfo.rewards = 0;
+
+        // Update totals
+        userTotalStaked[msg.sender] -= amount;
+        totalStaked -= amount;
+
+        // Transfer without penalty
+        stakingToken.safeTransfer(msg.sender, amount);
+
+        emit EmergencyWithdrawStake(msg.sender, stakeIndex, amount);
+    }
+
+    /**
+     * @dev Emergency withdraw all active stakes without caring about rewards (no penalty)
+     */
+    function emergencyWithdrawAll() external nonReentrant {
+        StakeInfo[] storage stakes = userStakes[msg.sender];
+        uint256 totalAmount = 0;
+
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (!stakes[i].withdrawn && stakes[i].amount > 0) {
+                totalAmount += stakes[i].amount;
+                stakes[i].withdrawn = true;
+                stakes[i].rewards = 0;
+                emit EmergencyWithdrawStake(msg.sender, i, stakes[i].amount);
+            }
+        }
+
+        require(totalAmount > 0, "Nothing to withdraw");
+
+        // Update totals
+        userTotalStaked[msg.sender] -= totalAmount;
+        totalStaked -= totalAmount;
+
+        // Transfer without penalty
+        stakingToken.safeTransfer(msg.sender, totalAmount);
+    }
+
+    /**
+     * @dev Calculate reward for a specific stake
+     * @param account User address
+     * @param stakeIndex Index of the stake
+     * @return Reward amount
+     */
+    function calculateStakeReward(address account, uint256 stakeIndex) public view returns (uint256) {
+        require(stakeIndex < userStakes[account].length, "Invalid stake index");
+
+        StakeInfo memory stakeInfo = userStakes[account][stakeIndex];
+
+        if (stakeInfo.withdrawn) {
+            return stakeInfo.rewards;
+        }
+
+        uint256 currentRewardPerToken = rewardPerToken();
+        return ((stakeInfo.amount * (currentRewardPerToken - stakeInfo.rewardPerTokenPaid)) / 1e18) + stakeInfo.rewards;
+    }
+
+    /**
+     * @dev Get all stakes for a user
+     * @param account User address
+     * @return Array of StakeInfo
+     */
+    function getUserStakes(address account) external view returns (StakeInfo[] memory) {
+        return userStakes[account];
+    }
+
+    /**
+     * @dev Get number of stakes for a user
+     * @param account User address
+     * @return Number of stakes
+     */
+    function getUserStakeCount(address account) external view returns (uint256) {
+        return userStakes[account].length;
+    }
+
+    /**
+     * @dev Get active stakes count for a user
+     * @param account User address
+     * @return Number of active stakes
+     */
+    function getActiveStakeCount(address account) external view returns (uint256) {
+        uint256 activeCount = 0;
+        StakeInfo[] memory stakes = userStakes[account];
+
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (!stakes[i].withdrawn) {
+                activeCount++;
+            }
+        }
+
+        return activeCount;
+    }
+
+    /**
+     * @dev Get total rewards from all active stakes
+     * @param account User address
+     * @return Total rewards
+     */
+    function getTotalStakeRewards(address account) external view returns (uint256) {
+        uint256 totalRewards = 0;
+        StakeInfo[] memory stakes = userStakes[account];
+
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (!stakes[i].withdrawn) {
+                totalRewards += calculateStakeReward(account, i);
+            }
+        }
+
+        return totalRewards;
+    }
+
+    // ============ View Functions ============
+
+    /**
+     * @dev Calculate potential penalty for early withdrawal of a specific stake
      * @param account Address to check
+     * @param stakeIndex Index of the stake
      * @return penalty Penalty amount in tokens
      */
-    function calculateWithdrawalPenalty(address account) external view returns (uint256 penalty) {
-        StakerInfo memory staker = stakers[account];
+    function calculateStakePenalty(address account, uint256 stakeIndex) external view returns (uint256 penalty) {
+        require(stakeIndex < userStakes[account].length, "Invalid stake index");
 
-        if (block.timestamp < staker.lastStakedTime + minimumStakingPeriod) {
-            penalty = (staker.stakedAmount * earlyWithdrawalPenalty) / 10000;
+        StakeInfo memory stakeInfo = userStakes[account][stakeIndex];
+
+        if (stakeInfo.withdrawn) {
+            return 0;
+        }
+
+        if (block.timestamp < stakeInfo.startTime + minimumStakingPeriod) {
+            penalty = (stakeInfo.amount * earlyWithdrawalPenalty) / 10000;
         } else {
             penalty = 0;
         }
@@ -334,5 +496,45 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
         // APR = (rewardRate * seconds in year * 100) / totalStaked
         uint256 annualReward = rewardRate * 365 days;
         return (annualReward * 10000) / totalStaked;
+    }
+
+    /**
+     * @dev Get comprehensive user summary for dashboard
+     * @param account User address
+     * @return totalStakedAmount Total amount staked across all stakes
+     * @return activeStakesCount Number of active (non-withdrawn) stakes
+     * @return totalStakesCount Total number of stakes (including withdrawn)
+     * @return totalPendingRewards Total pending rewards from all active stakes
+     * @return canWithdrawWithoutPenalty Number of stakes that can be withdrawn without penalty
+     * @return isLaunched Whether staking is available (token launched)
+     */
+    function getUserSummary(address account) external view returns (
+        uint256 totalStakedAmount,
+        uint256 activeStakesCount,
+        uint256 totalStakesCount,
+        uint256 totalPendingRewards,
+        uint256 canWithdrawWithoutPenalty,
+        bool isLaunched
+    ) {
+        totalStakedAmount = userTotalStaked[account];
+        totalStakesCount = userStakes[account].length;
+        activeStakesCount = 0;
+        totalPendingRewards = 0;
+        canWithdrawWithoutPenalty = 0;
+        isLaunched = tokenLaunched;
+
+        StakeInfo[] memory stakes = userStakes[account];
+
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (!stakes[i].withdrawn) {
+                activeStakesCount++;
+                totalPendingRewards += calculateStakeReward(account, i);
+
+                // Check if this stake can be withdrawn without penalty
+                if (block.timestamp >= stakes[i].startTime + minimumStakingPeriod) {
+                    canWithdrawWithoutPenalty++;
+                }
+            }
+        }
     }
 }
