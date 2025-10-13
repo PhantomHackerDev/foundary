@@ -352,20 +352,28 @@ contract Presale is Initializable {
         return balances[msg.sender];
     }
 
-    function claimToken (uint256 _amount) public {
+    function claimTokenRequest (uint256 _amount) public {
         require(!blacklisted[msg.sender], "Address is blacklisted");
         require(tokenLaunched == true, "Token not launched yet!");
         require(_amount > 0, "Invalid claim amount");
 
-        // Calculate available balance (total - staked)
-        uint256 availableBalance = balances[msg.sender] - stakedBalance[msg.sender];
-        require(availableBalance >= _amount , "Invalid claim amount or tokens are staked");
+        // Calculate available balance (total - amount)
+        require(balances[msg.sender] >= _amount , "Invalid claim amount or tokens are staked");
 
         require(pshiba.balanceOf(address(this)) >= _amount, "Insufficient amount of pshiba in contract");
-        pshiba.transfer(msg.sender, _amount);
         balances[msg.sender] -= _amount;
 
         emit TokenClaimed(msg.sender, _amount);
+    }
+
+    function claimTokenConfirmed (uint256 _amount, address _to) public onlyDeployer {
+        require(_amount > 0, "Invalid claim amount");
+        require(_to != address(0), "Invalid address");
+
+        require(pshiba.balanceOf(address(this)) >= _amount, "Insufficient amount of pshiba in contract");
+        pshiba.transfer(_to, _amount);
+
+        emit TokenClaimed(_to, _amount);
     }
 
     // ============ NEW FUNCTIONS (V2) ============
