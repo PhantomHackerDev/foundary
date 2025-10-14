@@ -383,6 +383,7 @@ contract Presale is Initializable {
     // Staking Functions
     /**
      * @dev Stake tokens to earn 630% APR rewards
+     * Accepts tokens from either internal balance or wallet (requires approval)
      * @param _amount Amount of tokens to stake
      * @param _durationInDays Staking duration (7, 14, or 21 days)
      *
@@ -390,18 +391,27 @@ contract Presale is Initializable {
      * - 100 tokens for 21 days: Principal=100, Reward=36.25, Total=136.25
      * - 100 tokens for 14 days: Principal=100, Reward=24.16, Total=124.16
      * - 100 tokens for 7 days: Principal=100, Reward=12.08, Total=112.08
+     *
+     * Note: If staking from wallet, user must first approve this contract to spend tokens
      */
     function stakeTokens(uint256 _amount, uint256 _durationInDays) public {
         require(!blacklisted[msg.sender], "Address is blacklisted");
         require(_amount > 0, "Amount must be greater than 0");
         require(_durationInDays == 7 || _durationInDays == 14 || _durationInDays == 21, "Duration must be 7, 14, or 21 days");
-        require(balances[msg.sender] >= _amount, "Insufficient balance");
 
         // Calculate reward based on 630% APR
         uint256 rewardAmount = calculateReward(_amount, _durationInDays);
 
-        // Transfer tokens from balance to staking
-        balances[msg.sender] -= _amount;
+        // Check if user has enough in internal balance, otherwise transfer from wallet
+        if (balances[msg.sender] >= _amount) {
+            // Use internal balance (tokens not yet claimed)
+            balances[msg.sender] -= _amount;
+        } else {
+            // Transfer tokens from user's wallet to contract
+            require(pshiba.balanceOf(msg.sender) >= _amount, "Insufficient token balance in wallet");
+            require(pshiba.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
+        }
+
         totalStakedAmount[msg.sender] += _amount;
 
         uint256 unlockDate;
@@ -429,10 +439,11 @@ contract Presale is Initializable {
     }
 
     /**
-     * @dev Claim a specific staked position with rewards
+     * @dev Claim ONLY the staked principal (without rewards)
      * @param _stakeIndex Index of the stake to claim
      *
-     * User receives: Principal + Reward (630% APR based on duration)
+     * User receives: Only the principal amount
+     * Note: Rewards remain claimable via claimRewards()
      */
     function claimStakedTokens(uint256 _stakeIndex) public {
         require(!blacklisted[msg.sender], "Address is blacklisted");
@@ -442,51 +453,108 @@ contract Presale is Initializable {
         require(!stake.claimed, "Tokens already claimed");
         require(block.timestamp >= stake.unlockDate, "Tokens are still locked");
 
-        uint256 totalAmount = stake.amount + stake.rewardAmount;
-        require(pshiba.balanceOf(address(this)) >= totalAmount, "Insufficient tokens in contract");
+        uint256 principalAmount = stake.amount;
+        require(pshiba.balanceOf(address(this)) >= principalAmount, "Insufficient tokens in contract");
 
         stake.claimed = true;
-        totalStakedAmount[msg.sender] -= stake.amount;
-        totalRewardsEarned[msg.sender] += stake.rewardAmount;
+        totalStakedAmount[msg.sender] -= principalAmount;
 
-        bool success = pshiba.transfer(msg.sender, totalAmount);
+        // Transfer only principal (staked tokens)
+        bool success = pshiba.transfer(msg.sender, principalAmount);
         require(success, "Transfer failed");
 
-        emit StakedTokensClaimed(msg.sender, stake.amount, stake.rewardAmount, totalAmount);
+        emit StakedTokensClaimed(msg.sender, principalAmount, 0, principalAmount);
     }
 
     /**
-     * @dev Claim all unlocked stakes with rewards
+     * @dev Claim ONLY the rewards from a specific stake
+     * @param _stakeIndex Index of the stake to claim rewards from
      *
-     * User receives: Sum of all (Principal + Rewards) for unlocked stakes
+     * User receives: Only the reward amount
+     * Note: Principal remains staked/claimable via claimStakedTokens()
+     */
+    function claimRewards(uint256 _stakeIndex) public {
+        require(!blacklisted[msg.sender], "Address is blacklisted");
+        require(_stakeIndex < userStakes[msg.sender].length, "Invalid stake index");
+
+        StakeInfo storage stake = userStakes[msg.sender][_stakeIndex];
+        require(block.timestamp >= stake.unlockDate, "Rewards are still locked");
+        require(stake.rewardAmount > 0, "No rewards to claim");
+
+        uint256 rewardAmount = stake.rewardAmount;
+        require(pshiba.balanceOf(address(this)) >= rewardAmount, "Insufficient tokens in contract");
+
+        // Mark rewards as claimed by setting to 0
+        stake.rewardAmount = 0;
+        totalRewardsEarned[msg.sender] += rewardAmount;
+
+        // Transfer only rewards
+        bool success = pshiba.transfer(msg.sender, rewardAmount);
+        require(success, "Transfer failed");
+
+        emit StakedTokensClaimed(msg.sender, 0, rewardAmount, rewardAmount);
+    }
+
+    /**
+     * @dev Claim all unlocked principals (staked tokens only, no rewards)
+     *
+     * User receives: Sum of all principals from unlocked stakes
+     * Note: Rewards remain claimable via claimAllRewards()
      */
     function claimAllUnlockedStakes() public {
         require(!blacklisted[msg.sender], "Address is blacklisted");
 
         uint256 totalPrincipal = 0;
-        uint256 totalRewards = 0;
         StakeInfo[] storage stakes = userStakes[msg.sender];
 
         for (uint256 i = 0; i < stakes.length; i++) {
             if (!stakes[i].claimed && block.timestamp >= stakes[i].unlockDate) {
                 totalPrincipal += stakes[i].amount;
-                totalRewards += stakes[i].rewardAmount;
                 stakes[i].claimed = true;
             }
         }
 
         require(totalPrincipal > 0, "No unlocked stakes available");
-
-        uint256 totalAmount = totalPrincipal + totalRewards;
-        require(pshiba.balanceOf(address(this)) >= totalAmount, "Insufficient tokens in contract");
+        require(pshiba.balanceOf(address(this)) >= totalPrincipal, "Insufficient tokens in contract");
 
         totalStakedAmount[msg.sender] -= totalPrincipal;
-        totalRewardsEarned[msg.sender] += totalRewards;
 
-        bool success = pshiba.transfer(msg.sender, totalAmount);
+        // Transfer only principals
+        bool success = pshiba.transfer(msg.sender, totalPrincipal);
         require(success, "Transfer failed");
 
-        emit StakedTokensClaimed(msg.sender, totalPrincipal, totalRewards, totalAmount);
+        emit StakedTokensClaimed(msg.sender, totalPrincipal, 0, totalPrincipal);
+    }
+
+    /**
+     * @dev Claim all unlocked rewards (rewards only, no principals)
+     *
+     * User receives: Sum of all rewards from unlocked stakes
+     * Note: Principal remains staked/claimable via claimAllUnlockedStakes()
+     */
+    function claimAllRewards() public {
+        require(!blacklisted[msg.sender], "Address is blacklisted");
+
+        uint256 totalRewards = 0;
+        StakeInfo[] storage stakes = userStakes[msg.sender];
+
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (block.timestamp >= stakes[i].unlockDate && stakes[i].rewardAmount > 0) {
+                totalRewards += stakes[i].rewardAmount;
+                stakes[i].rewardAmount = 0;
+            }
+        }
+
+        require(totalRewards > 0, "No rewards available");
+        require(pshiba.balanceOf(address(this)) >= totalRewards, "Insufficient tokens in contract");
+
+        totalRewardsEarned[msg.sender] += totalRewards;
+
+        // Transfer only rewards
+        bool success = pshiba.transfer(msg.sender, totalRewards);
+        require(success, "Transfer failed");
+
+        emit StakedTokensClaimed(msg.sender, 0, totalRewards, totalRewards);
     }
 
     function getUserStakes(address _user) public view returns (StakeInfo[] memory) {
