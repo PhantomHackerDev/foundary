@@ -34,8 +34,8 @@ contract Presale is Initializable {
     event AddressUnblacklisted(address indexed account);
     event BulkBlacklisted(address[] accounts, uint256 count);
     event BulkUnblacklisted(address[] accounts, uint256 count);
-    event TokensStaked(address indexed user, uint256 amount, uint256 duration, uint256 unlockDate);
-    event StakedTokensClaimed(address indexed user, uint256 amount);
+    event TokensStaked(address indexed user, uint256 amount, uint256 duration, uint256 unlockDate, uint256 expectedReward);
+    event StakedTokensClaimed(address indexed user, uint256 principal, uint256 reward, uint256 total);
 
     mapping (address=>uint256) public balances;
     mapping (address=>bool) public blacklisted;
@@ -44,17 +44,25 @@ contract Presale is Initializable {
     uint256 public launchDate;
     bool public tokenLaunched;
 
+    // Reward system variables
+    // 630% APR = 6.3x multiplier per year
+    uint256 public constant ANNUAL_REWARD_RATE = 630; // 630% = 630/100 = 6.3x
+    uint256 public constant RATE_DENOMINATOR = 100;
+    uint256 public constant SECONDS_PER_YEAR = 31536000; // 365 days
+
     // Staking structures
     struct StakeInfo {
-        uint256 amount;
-        uint256 stakeDuration; // in days (1, 7, 14, or 28)
-        uint256 stakeStartTime;
-        uint256 unlockDate;
-        bool claimed;
+        uint256 amount;              // Principal staked amount
+        uint256 stakeDuration;       // in days (7, 14, or 21)
+        uint256 stakeStartTime;      // When stake was created
+        uint256 unlockDate;          // When stake can be claimed
+        uint256 rewardAmount;        // Calculated reward based on 630% APR
+        bool claimed;                // Whether stake has been claimed
     }
 
     mapping(address => StakeInfo[]) public userStakes;
     mapping(address => uint256) public totalStakedAmount;
+    mapping(address => uint256) public totalRewardsEarned;  // Track total rewards per user
 
     receive() external payable {}
 
@@ -324,6 +332,31 @@ contract Presale is Initializable {
         return balances[msg.sender];
     }
 
+    /**
+     * @dev Calculate reward for a given stake amount and duration
+     * @param _amount Principal amount staked
+     * @param _durationInDays Staking duration in days
+     * @return reward The calculated reward amount
+     *
+     * Formula: reward = principal × (630/100) × (stakeDays / 365)
+     *
+     * Examples:
+     * - 100 tokens for 365 days: 100 × 6.3 × 1 = 630 tokens
+     * - 100 tokens for 28 days: 100 × 6.3 × (28/365) = 48.33 tokens
+     * - 100 tokens for 14 days: 100 × 6.3 × (14/365) = 24.16 tokens
+     * - 100 tokens for 7 days: 100 × 6.3 × (7/365) = 12.08 tokens
+     * - 100 tokens for 1 day: 100 × 6.3 × (1/365) = 1.73 tokens
+     */
+    function calculateReward(uint256 _amount, uint256 _durationInDays) public pure returns (uint256) {
+        // reward = amount × 630% × (days / 365)
+        // reward = amount × 630 / 100 × days / 365
+        // reward = (amount × 630 × days) / (100 × 365)
+        // reward = (amount × 630 × days) / 36500
+
+        uint256 reward = (_amount * ANNUAL_REWARD_RATE * _durationInDays) / (RATE_DENOMINATOR * 365);
+        return reward;
+    }
+
     function claimTokenRequest (uint256 _amount) public {
         require(!blacklisted[msg.sender], "Address is blacklisted");
         require(tokenLaunched == true, "Token not launched yet!");
@@ -348,11 +381,24 @@ contract Presale is Initializable {
     }
 
     // Staking Functions
+    /**
+     * @dev Stake tokens to earn 630% APR rewards
+     * @param _amount Amount of tokens to stake
+     * @param _durationInDays Staking duration (7, 14, or 21 days)
+     *
+     * Reward Examples:
+     * - 100 tokens for 21 days: Principal=100, Reward=36.25, Total=136.25
+     * - 100 tokens for 14 days: Principal=100, Reward=24.16, Total=124.16
+     * - 100 tokens for 7 days: Principal=100, Reward=12.08, Total=112.08
+     */
     function stakeTokens(uint256 _amount, uint256 _durationInDays) public {
         require(!blacklisted[msg.sender], "Address is blacklisted");
         require(_amount > 0, "Amount must be greater than 0");
-        require(_durationInDays == 1 || _durationInDays == 7 || _durationInDays == 14 || _durationInDays == 28, "Duration must be 1, 7, 14, or 28 days");
+        require(_durationInDays == 7 || _durationInDays == 14 || _durationInDays == 21, "Duration must be 7, 14, or 21 days");
         require(balances[msg.sender] >= _amount, "Insufficient balance");
+
+        // Calculate reward based on 630% APR
+        uint256 rewardAmount = calculateReward(_amount, _durationInDays);
 
         // Transfer tokens from balance to staking
         balances[msg.sender] -= _amount;
@@ -369,18 +415,25 @@ contract Presale is Initializable {
             unlockDate = block.timestamp + (_durationInDays * 1 days);
         }
 
-        // Create new stake
+        // Create new stake with reward
         userStakes[msg.sender].push(StakeInfo({
             amount: _amount,
             stakeDuration: _durationInDays,
             stakeStartTime: block.timestamp,
             unlockDate: unlockDate,
+            rewardAmount: rewardAmount,
             claimed: false
         }));
 
-        emit TokensStaked(msg.sender, _amount, _durationInDays, unlockDate);
+        emit TokensStaked(msg.sender, _amount, _durationInDays, unlockDate, rewardAmount);
     }
 
+    /**
+     * @dev Claim a specific staked position with rewards
+     * @param _stakeIndex Index of the stake to claim
+     *
+     * User receives: Principal + Reward (630% APR based on duration)
+     */
     function claimStakedTokens(uint256 _stakeIndex) public {
         require(!blacklisted[msg.sender], "Address is blacklisted");
         require(_stakeIndex < userStakes[msg.sender].length, "Invalid stake index");
@@ -388,39 +441,52 @@ contract Presale is Initializable {
         StakeInfo storage stake = userStakes[msg.sender][_stakeIndex];
         require(!stake.claimed, "Tokens already claimed");
         require(block.timestamp >= stake.unlockDate, "Tokens are still locked");
-        require(pshiba.balanceOf(address(this)) >= stake.amount, "Insufficient tokens in contract");
+
+        uint256 totalAmount = stake.amount + stake.rewardAmount;
+        require(pshiba.balanceOf(address(this)) >= totalAmount, "Insufficient tokens in contract");
 
         stake.claimed = true;
         totalStakedAmount[msg.sender] -= stake.amount;
+        totalRewardsEarned[msg.sender] += stake.rewardAmount;
 
-        bool success = pshiba.transfer(msg.sender, stake.amount);
+        bool success = pshiba.transfer(msg.sender, totalAmount);
         require(success, "Transfer failed");
 
-        emit StakedTokensClaimed(msg.sender, stake.amount);
+        emit StakedTokensClaimed(msg.sender, stake.amount, stake.rewardAmount, totalAmount);
     }
 
+    /**
+     * @dev Claim all unlocked stakes with rewards
+     *
+     * User receives: Sum of all (Principal + Rewards) for unlocked stakes
+     */
     function claimAllUnlockedStakes() public {
         require(!blacklisted[msg.sender], "Address is blacklisted");
 
-        uint256 totalClaimable = 0;
+        uint256 totalPrincipal = 0;
+        uint256 totalRewards = 0;
         StakeInfo[] storage stakes = userStakes[msg.sender];
 
         for (uint256 i = 0; i < stakes.length; i++) {
             if (!stakes[i].claimed && block.timestamp >= stakes[i].unlockDate) {
-                totalClaimable += stakes[i].amount;
+                totalPrincipal += stakes[i].amount;
+                totalRewards += stakes[i].rewardAmount;
                 stakes[i].claimed = true;
             }
         }
 
-        require(totalClaimable > 0, "No unlocked stakes available");
-        require(pshiba.balanceOf(address(this)) >= totalClaimable, "Insufficient tokens in contract");
+        require(totalPrincipal > 0, "No unlocked stakes available");
 
-        totalStakedAmount[msg.sender] -= totalClaimable;
+        uint256 totalAmount = totalPrincipal + totalRewards;
+        require(pshiba.balanceOf(address(this)) >= totalAmount, "Insufficient tokens in contract");
 
-        bool success = pshiba.transfer(msg.sender, totalClaimable);
+        totalStakedAmount[msg.sender] -= totalPrincipal;
+        totalRewardsEarned[msg.sender] += totalRewards;
+
+        bool success = pshiba.transfer(msg.sender, totalAmount);
         require(success, "Transfer failed");
 
-        emit StakedTokensClaimed(msg.sender, totalClaimable);
+        emit StakedTokensClaimed(msg.sender, totalPrincipal, totalRewards, totalAmount);
     }
 
     function getUserStakes(address _user) public view returns (StakeInfo[] memory) {
@@ -435,6 +501,11 @@ contract Presale is Initializable {
         return totalStakedAmount[_user];
     }
 
+    /**
+     * @dev Get claimable staked principal amount (without rewards)
+     * @param _user User address
+     * @return claimable Principal amount that can be claimed
+     */
     function getClaimableStakedAmount(address _user) public view returns (uint256) {
         uint256 claimable = 0;
         StakeInfo[] memory stakes = userStakes[_user];
@@ -446,6 +517,62 @@ contract Presale is Initializable {
         }
 
         return claimable;
+    }
+
+    /**
+     * @dev Get total claimable rewards (not including principal)
+     * @param _user User address
+     * @return rewards Total rewards that can be claimed
+     */
+    function getClaimableRewards(address _user) public view returns (uint256) {
+        uint256 rewards = 0;
+        StakeInfo[] memory stakes = userStakes[_user];
+
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (!stakes[i].claimed && block.timestamp >= stakes[i].unlockDate) {
+                rewards += stakes[i].rewardAmount;
+            }
+        }
+
+        return rewards;
+    }
+
+    /**
+     * @dev Get total claimable amount (principal + rewards)
+     * @param _user User address
+     * @return total Total amount that can be claimed
+     */
+    function getTotalClaimableAmount(address _user) public view returns (uint256) {
+        uint256 totalPrincipal = 0;
+        uint256 totalRewards = 0;
+        StakeInfo[] memory stakes = userStakes[_user];
+
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (!stakes[i].claimed && block.timestamp >= stakes[i].unlockDate) {
+                totalPrincipal += stakes[i].amount;
+                totalRewards += stakes[i].rewardAmount;
+            }
+        }
+
+        return totalPrincipal + totalRewards;
+    }
+
+    /**
+     * @dev Get pending rewards (not yet claimable, still locked)
+     * @param _user User address
+     * @return rewards Pending rewards in locked stakes
+     */
+    function getPendingRewards(address _user) public view returns (uint256) {
+        uint256 rewards = 0;
+        StakeInfo[] memory stakes = userStakes[_user];
+
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (!stakes[i].claimed && block.timestamp < stakes[i].unlockDate) {
+                rewards += stakes[i].rewardAmount;
+            }
+        }
+
+        return rewards;
     }
 
     function getLockedStakedAmount(address _user) public view returns (uint256) {
@@ -463,6 +590,35 @@ contract Presale is Initializable {
 
     function getAvailableBalance(address _user) public view returns (uint256) {
         return balances[_user];
+    }
+
+    function getUserStakingSummary(address _user) public view returns (
+        uint256 availableBalance,
+        uint256 totalStaked,
+        uint256 lockedStaked,
+        uint256 claimableStaked,
+        uint256 pendingRewards,
+        uint256 claimableRewards,
+        uint256 totalRewardsEarned_,
+        uint256 totalClaimableWithRewards,
+        uint256 activeStakesCount
+    ) {
+        availableBalance = balances[_user];
+        totalStaked = totalStakedAmount[_user];
+        lockedStaked = getLockedStakedAmount(_user);
+        claimableStaked = getClaimableStakedAmount(_user);
+        pendingRewards = getPendingRewards(_user);
+        claimableRewards = getClaimableRewards(_user);
+        totalRewardsEarned_ = totalRewardsEarned[_user];
+        totalClaimableWithRewards = getTotalClaimableAmount(_user);
+
+        // Count active stakes
+        StakeInfo[] memory stakes = userStakes[_user];
+        for (uint256 i = 0; i < stakes.length; i++) {
+            if (!stakes[i].claimed) {
+                activeStakesCount++;
+            }
+        }
     }
 
     // Launch management
