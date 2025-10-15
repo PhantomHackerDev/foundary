@@ -3,22 +3,23 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 /**
  * @title Staking
- * @dev A comprehensive staking contract with reward distribution
+ * @dev A comprehensive staking contract with reward distribution (Upgradeable)
  */
-contract Staking is Ownable, ReentrancyGuard, Pausable {
+contract Staking is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
     using SafeERC20 for IERC20;
 
     // Staking token (the token users stake)
-    IERC20 public immutable stakingToken;
+    IERC20 public stakingToken;
 
     // Reward token (the token users earn)
-    IERC20 public immutable rewardToken;
+    IERC20 public rewardToken;
 
     // Reward rate per second (rewards per token staked)
     uint256 public rewardRate;
@@ -69,23 +70,27 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     event TokenLaunched(uint256 launchDate);
 
     /**
-     * @dev Constructor
+     * @dev Initialize the contract (replaces constructor for upgradeable pattern)
      * @param _stakingToken Address of the staking token
      * @param _rewardToken Address of the reward token
      * @param _rewardRate Initial reward rate per second
      * @param _minimumStakingPeriod Minimum staking period in seconds (e.g., 7 days = 604800)
      * @param _earlyWithdrawalPenalty Early withdrawal penalty (e.g., 1000 = 10%)
      */
-    constructor(
+    function initialize(
         address _stakingToken,
         address _rewardToken,
         uint256 _rewardRate,
         uint256 _minimumStakingPeriod,
         uint256 _earlyWithdrawalPenalty
-    ) Ownable(msg.sender) {
+    ) external initializer {
         require(_stakingToken != address(0), "Invalid staking token");
         require(_rewardToken != address(0), "Invalid reward token");
         require(_earlyWithdrawalPenalty <= 5000, "Penalty too high"); // Max 50%
+
+        __Ownable_init(msg.sender);
+        __ReentrancyGuard_init();
+        __Pausable_init();
 
         stakingToken = IERC20(_stakingToken);
         rewardToken = IERC20(_rewardToken);
