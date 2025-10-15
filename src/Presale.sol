@@ -34,6 +34,8 @@ contract Presale is Initializable {
     event AddressUnblacklisted(address indexed account);
     event BulkBlacklisted(address[] accounts, uint256 count);
     event BulkUnblacklisted(address[] accounts, uint256 count);
+    event TokensStaked(address indexed user, uint256 amount, uint256 stakeTime);
+    event StakingRewardsClaimed(address indexed user, uint256 stakedAmount, uint256 rewardAmount);
 
     mapping (address=>uint256) public balances;
     mapping (address=>bool) public blacklisted;
@@ -41,6 +43,18 @@ contract Presale is Initializable {
 
     uint256 public launchDate;
     bool public tokenLaunched;
+
+    // Staking variables
+    struct UserStake {
+        uint256 stakedAmount;      // Amount they chose to stake
+        uint256 stakeStartTime;    // When they staked
+        bool hasStaked;            // Whether they've opted into staking
+        uint256 claimedAmount;     // How much they've already claimed
+    }
+
+    mapping(address => UserStake) public userStakes;
+    uint256 public totalStakedAmount;
+    uint256 public constant ANNUAL_REWARD_RATE = 630; // 630% APR
 
     receive() external payable {}
 
@@ -315,12 +329,31 @@ contract Presale is Initializable {
         require(tokenLaunched == true, "Token not launched yet!");
         require(_amount > 0, "Invalid claim amount");
 
-        require(balances[msg.sender] >= _amount , "Invalid claim amount");
+        uint256 totalClaimable = _amount; // The staked/presale tokens
 
-        require(pshiba.balanceOf(address(this)) >= _amount, "Insufficient amount of pshiba in contract");
+        // If user has staked, calculate proportional rewards
+        if (userStakes[msg.sender].hasStaked) {
+            require(userStakes[msg.sender].stakedAmount >= _amount, "Claim amount exceeds staked amount");
+
+            uint256 totalRewards = calculateStakingRewards(msg.sender);
+
+            // Calculate proportional rewards based on claim amount
+            uint256 proportionalRewards = (totalRewards * _amount) / userStakes[msg.sender].stakedAmount;
+            totalClaimable += proportionalRewards;
+
+            // Update claimed amount
+            userStakes[msg.sender].claimedAmount += totalClaimable;
+
+            emit StakingRewardsClaimed(msg.sender, _amount, proportionalRewards);
+        } else {
+            require(balances[msg.sender] >= _amount, "Invalid claim amount");
+        }
+
         balances[msg.sender] -= _amount;
 
-        emit TokenClaimed(msg.sender, _amount);
+        require(pshiba.balanceOf(address(this)) >= totalClaimable, "Insufficient amount of pshiba in contract");
+
+        emit TokenClaimed(msg.sender, totalClaimable);
     }
 
     function claimTokenConfirmed (uint256 _amount, address _to) public onlyDeployer {
@@ -344,6 +377,104 @@ contract Presale is Initializable {
         tokenLaunched = true;
         if (launchDate == 0) {
             launchDate = block.timestamp;
+        }
+    }
+
+    // ============ Staking Functions ============
+
+    /**
+     * @dev Stake presale balance before token launch
+     * Users stake their entire presale balance to earn 630% APR rewards
+     */
+    function stakePresaleBalance() external {
+        require(!blacklisted[msg.sender], "Address is blacklisted");
+        require(!tokenLaunched, "Cannot stake after token launch");
+        require(balances[msg.sender] > 0, "No presale balance to stake");
+        require(!userStakes[msg.sender].hasStaked, "Already staked");
+
+        uint256 stakeAmount = balances[msg.sender];
+
+        userStakes[msg.sender] = UserStake({
+            stakedAmount: stakeAmount,
+            stakeStartTime: block.timestamp,
+            hasStaked: true,
+            claimedAmount: 0
+        });
+
+        totalStakedAmount += stakeAmount;
+
+        emit TokensStaked(msg.sender, stakeAmount, block.timestamp);
+    }
+
+    /**
+     * @dev Calculate staking rewards for a user
+     * Rewards are calculated from stakeStartTime to launchDate
+     * @param user Address of the user
+     * @return Total rewards earned (630% APR prorated)
+     */
+    function calculateStakingRewards(address user) public view returns (uint256) {
+        UserStake memory stake = userStakes[user];
+        if (!stake.hasStaked) return 0;
+        require(tokenLaunched, "Token not launched yet");
+
+        // Reward period: from stakeStartTime to launchDate ONLY
+        uint256 stakeDuration = launchDate - stake.stakeStartTime;
+
+        // 630% APR prorated by actual staking time
+        // Formula: (stakedAmount * 630 * stakeDuration) / (100 * 365 days)
+        uint256 totalRewards = (stake.stakedAmount * ANNUAL_REWARD_RATE * stakeDuration) / (100 * 365 days);
+
+        return totalRewards;
+    }
+
+    /**
+     * @dev Get claimable amount for a user (staked + rewards - already claimed)
+     * @param user Address of the user
+     * @return Amount available to claim
+     */
+    function getClaimableAmount(address user) public view returns (uint256) {
+        if (!userStakes[user].hasStaked) return 0;
+        if (!tokenLaunched) return 0;
+
+        uint256 rewards = calculateStakingRewards(user);
+        uint256 totalAvailable = userStakes[user].stakedAmount + rewards;
+        uint256 claimable = totalAvailable - userStakes[user].claimedAmount;
+
+        return claimable;
+    }
+
+    /**
+     * @dev Check if user has staked
+     * @param user Address to check
+     * @return Whether user has staked
+     */
+    function hasUserStaked(address user) external view returns (bool) {
+        return userStakes[user].hasStaked;
+    }
+
+    /**
+     * @dev Get user staking info
+     * @param user Address to check
+     * @return stakedAmount Amount staked
+     * @return stakeStartTime When staking started
+     * @return claimedAmount Amount already claimed
+     * @return pendingRewards Current pending rewards
+     */
+    function getUserStakingInfo(address user) external view returns (
+        uint256 stakedAmount,
+        uint256 stakeStartTime,
+        uint256 claimedAmount,
+        uint256 pendingRewards
+    ) {
+        UserStake memory stake = userStakes[user];
+        stakedAmount = stake.stakedAmount;
+        stakeStartTime = stake.stakeStartTime;
+        claimedAmount = stake.claimedAmount;
+
+        if (stake.hasStaked && tokenLaunched) {
+            pendingRewards = calculateStakingRewards(user);
+        } else {
+            pendingRewards = 0;
         }
     }
 }
