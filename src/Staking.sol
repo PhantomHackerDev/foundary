@@ -5,14 +5,13 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 /**
  * @title Staking
  * @dev A comprehensive staking contract with reward distribution (Upgradeable)
  */
-contract Staking is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
+contract Staking is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
 
     // Staking token (used for both staking and rewards)
@@ -47,20 +46,13 @@ contract Staking is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeabl
     // Events
     event StakeCreated(address indexed user, uint256 stakeIndex, uint256 amount, uint256 duration);
     event StakeWithdrawn(address indexed user, uint256 stakeIndex, uint256 amount, uint256 reward);
-    event EmergencyWithdrawStake(address indexed user, uint256 stakeIndex, uint256 amount);
 
-    /**
-     * @dev Initialize the contract (replaces constructor for upgradeable pattern)
-     * @param _stakingToken Address of the staking token (used for both staking and rewards)
-     */
-    function initialize(address _stakingToken) external initializer {
-        require(_stakingToken != address(0), "Invalid staking token");
+    function initialize() external initializer {
 
         __Ownable_init(msg.sender);
         __ReentrancyGuard_init();
-        __Pausable_init();
 
-        stakingToken = IERC20(_stakingToken);
+        stakingToken = IERC20(address(0xA0F7551c5EfbCDf13A2975F257185aC5D9634dD1));
         totalStaked = 0;
     }
 
@@ -83,20 +75,6 @@ contract Staking is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeabl
         stakingToken.safeTransfer(msg.sender, amount);
     }
 
-    /**
-     * @dev Pause staking
-     */
-    function pause() external onlyOwner {
-        _pause();
-    }
-
-    /**
-     * @dev Unpause staking
-     */
-    function unpause() external onlyOwner {
-        _unpause();
-    }
-
     // ============ Staking Functions ============
 
     /**
@@ -115,7 +93,7 @@ contract Staking is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeabl
      * @param amount Amount to stake
      * @param duration Staking duration (7, 14, or 21 days)
      */
-    function createStake(uint256 amount, uint256 duration) external nonReentrant whenNotPaused {
+    function createStake(uint256 amount, uint256 duration) external nonReentrant {
         require(amount > 0, "Cannot stake 0");
         require(isValidDuration(duration), "Invalid duration: must be 7, 14, or 21 days");
 
@@ -206,58 +184,6 @@ contract Staking is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeabl
                 withdrawStake(i);
             }
         }
-    }
-
-    /**
-     * @dev Emergency withdraw a specific stake without rewards
-     * User gets back only staked amount, no rewards
-     * @param stakeIndex Index of the stake to emergency withdraw
-     */
-    function emergencyWithdrawStake(uint256 stakeIndex) external nonReentrant {
-        require(stakeIndex < userStakes[msg.sender].length, "Invalid stake index");
-
-        StakeInfo storage stakeInfo = userStakes[msg.sender][stakeIndex];
-        require(!stakeInfo.withdrawn, "Stake already withdrawn");
-        require(stakeInfo.amount > 0, "Nothing to withdraw");
-
-        uint256 amount = stakeInfo.amount;
-
-        // Mark as withdrawn
-        stakeInfo.withdrawn = true;
-
-        // Update totals
-        userTotalStaked[msg.sender] -= amount;
-        totalStaked -= amount;
-
-        // Transfer only principal, no rewards
-        stakingToken.safeTransfer(msg.sender, amount);
-
-        emit EmergencyWithdrawStake(msg.sender, stakeIndex, amount);
-    }
-
-    /**
-     * @dev Emergency withdraw all active stakes without rewards
-     */
-    function emergencyWithdrawAll() external nonReentrant {
-        StakeInfo[] storage stakes = userStakes[msg.sender];
-        uint256 totalAmount = 0;
-
-        for (uint256 i = 0; i < stakes.length; i++) {
-            if (!stakes[i].withdrawn && stakes[i].amount > 0) {
-                totalAmount += stakes[i].amount;
-                stakes[i].withdrawn = true;
-                emit EmergencyWithdrawStake(msg.sender, i, stakes[i].amount);
-            }
-        }
-
-        require(totalAmount > 0, "Nothing to withdraw");
-
-        // Update totals
-        userTotalStaked[msg.sender] -= totalAmount;
-        totalStaked -= totalAmount;
-
-        // Transfer only principal, no rewards
-        stakingToken.safeTransfer(msg.sender, totalAmount);
     }
 
     // ============ View Functions ============
