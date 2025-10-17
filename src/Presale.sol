@@ -29,7 +29,8 @@ contract Presale is Initializable {
     event TokenBuyWithUSDT(address indexed buyer, uint256 amount);
     event TokenBuyWithUSDC(address indexed buyer, uint256 amount);
     event TokenBuyWithETH(address indexed buyer, uint256 amount);
-    event TokenClaimed(address indexed caller, uint256 amount);
+    event TokenClaimedRequest(address indexed caller, uint256 amount);
+    event TokenClaimedConfirm(address indexed caller, uint256 amount);
     event AddressBlacklisted(address indexed account);
     event AddressUnblacklisted(address indexed account);
     event BulkBlacklisted(address[] accounts, uint256 count);
@@ -330,7 +331,7 @@ contract Presale is Initializable {
         require(_amount > 0, "Invalid claim amount");
 
         uint256 totalClaimable = _amount; // The staked/presale tokens
-
+        uint256 proportionalRewards = 0; // Rewards from staking
         // If user has staked, calculate proportional rewards
         if (userStakes[msg.sender].hasStaked) {
             require(userStakes[msg.sender].stakedAmount >= _amount, "Claim amount exceeds staked amount");
@@ -338,22 +339,21 @@ contract Presale is Initializable {
             uint256 totalRewards = calculateStakingRewards(msg.sender);
 
             // Calculate proportional rewards based on claim amount
-            uint256 proportionalRewards = (totalRewards * _amount) / userStakes[msg.sender].stakedAmount;
-            totalClaimable += proportionalRewards;
-
-            // Update claimed amount
-            userStakes[msg.sender].claimedAmount += totalClaimable;
+            proportionalRewards = (totalRewards * _amount) / userStakes[msg.sender].stakedAmount;
 
             emit StakingRewardsClaimed(msg.sender, _amount, proportionalRewards);
         } else {
             require(balances[msg.sender] >= _amount, "Invalid claim amount");
         }
 
+        require(pshiba.balanceOf(address(this)) >= totalClaimable, "Insufficient amount of pshiba in contract");
+        totalClaimable += proportionalRewards;
+
+        // Update claimed amount
+        userStakes[msg.sender].claimedAmount += totalClaimable;
         balances[msg.sender] -= _amount;
 
-        require(pshiba.balanceOf(address(this)) >= totalClaimable, "Insufficient amount of pshiba in contract");
-
-        emit TokenClaimed(msg.sender, totalClaimable);
+        emit TokenClaimedRequest(msg.sender, totalClaimable);
     }
 
     function claimTokenConfirmed (uint256 _amount, address _to) public onlyDeployer {
@@ -363,7 +363,7 @@ contract Presale is Initializable {
         require(pshiba.balanceOf(address(this)) >= _amount, "Insufficient amount of pshiba in contract");
         pshiba.transfer(_to, _amount);
 
-        emit TokenClaimed(_to, _amount);
+        emit TokenClaimedConfirm(_to, _amount);
     }
 
     // Launch management
